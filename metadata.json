@@ -1,0 +1,8 @@
+{
+  "name": "Remix AI Website Tester",
+  "description": "AI-powered QA automation platform that analyzes websites, generates test cases, runs Playwright browser tests, and produces Gemini AI bug reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
