@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && node scripts/install-browser.js",
-    "postinstall": "node scripts/install-browser.js",
+    "build": "vite build",
     "preview": "vite preview",
     "start": "tsx server.ts",
     "clean": "rm -rf dist server.js",
