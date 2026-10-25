@@ -19,6 +19,7 @@ export interface BrowserStatus {
 }
 
 export class BrowserManager {
+  private static cachedStatus: BrowserStatus | null = null;
   private static localBrowsersPath = path.resolve(process.cwd(), 'node_modules/playwright-core/.local-browsers');
 
   /**
@@ -30,7 +31,7 @@ export class BrowserManager {
     }
 
     // Ensure permissions if directory exists
-    if (fs.existsSync(this.localBrowsersPath)) {
+    if (process.platform === 'linux' && fs.existsSync(this.localBrowsersPath)) {
       try {
         execSync(`chmod -R 755 "${this.localBrowsersPath}"`, { stdio: 'ignore' });
       } catch {}
@@ -106,29 +107,13 @@ export class BrowserManager {
     return null;
   }
 
-  /**
-   * Ensures browser is installed, downloading if missing
-   */
-  public static ensureInstalled(): void {
-    const existing = this.findChromiumExecutable();
-    if (existing) {
-      return;
-    }
-
-    console.log('[BrowserManager] Chromium executable not found. Running playwright install chromium...');
-    try {
-      execSync('npx playwright install chromium', {
-        stdio: 'inherit',
-        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: '0' }
-      });
-      this.initEnvironment();
-    } catch (e: any) {
-      console.error('[BrowserManager] Failed to install playwright browser:', e?.message || e);
-    }
+  private static delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
-   * Launches browser with multi-strategy fallback to ensure reliable execution in production
+   * Launch Chromium with bounded retries. Browser installation belongs in build/postinstall,
+   * not inside a live scan request (which can block the Node event loop).
    */
   public static async launch(): Promise<Browser> {
     this.initEnvironment();
@@ -144,46 +129,83 @@ export class BrowserManager {
       '--disable-default-apps'
     ];
 
-    // Primary attempt: standard launch with environment configured
-    try {
-      return await chromium.launch({
-        headless: true,
-        args: launchArgs
-      });
-    } catch (primaryErr: any) {
-      console.warn(`[BrowserManager] Standard launch failed (${primaryErr?.message}). Trying explicit executable...`);
+    const resolvedPath = this.findChromiumExecutable();
+    const strategies: Array<{ executablePath?: string; label: string }> = [
+      { label: 'Playwright default' },
+      ...(resolvedPath ? [{ executablePath: resolvedPath, label: 'explicit executable' }] : [])
+    ];
+    let lastError: unknown;
 
-      // Attempt with explicit executablePath
-      const resolvedPath = this.findChromiumExecutable();
-      if (resolvedPath) {
+    // Retry each available launch strategy up to 2 times. A short backoff helps transient
+    // process/resource contention without allowing a scan to hang indefinitely.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      for (const strategy of strategies) {
         try {
-          return await chromium.launch({
+          const browser = await chromium.launch({
             headless: true,
-            executablePath: resolvedPath,
-            args: launchArgs
+            args: launchArgs,
+            timeout: 10000,
+            ...(strategy.executablePath ? { executablePath: strategy.executablePath } : {})
           });
-        } catch (execErr: any) {
-          console.warn(`[BrowserManager] Explicit executable launch failed: ${execErr?.message}`);
+          this.cachedStatus = {
+            ready: true,
+            version: browser.version(),
+            executablePath: strategy.executablePath || resolvedPath || 'detected-by-playwright',
+            browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
+            user: process.env.USER || (process.getuid ? String(process.getuid()) : 'unknown'),
+            homeDir: process.env.HOME || ''
+          };
+          return browser;
+        } catch (err) {
+          lastError = err;
+          console.warn(`[BrowserManager] ${strategy.label} launch attempt ${attempt}/2 failed: ${(err as Error)?.message || err}`);
         }
       }
+      if (attempt < 2) await this.delay(300 * attempt);
+    }
 
-      // If missing, attempt on-demand install
-      this.ensureInstalled();
-      const retryPath = this.findChromiumExecutable();
+    const message = lastError instanceof Error ? lastError.message : String(lastError || 'Unknown Chromium error');
+    this.cachedStatus = {
+      ready: false,
+      executablePath: resolvedPath || 'not-found',
+      browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
+      user: process.env.USER || (process.getuid ? String(process.getuid()) : 'unknown'),
+      homeDir: process.env.HOME || '',
+      error: message
+    };
+    throw new Error(`Chromium failed to launch after 2 bounded attempts per strategy: ${message}. Install the browser with "npx playwright install chromium" and restart BugScout.`);
+  }
 
-      if (retryPath) {
-        return await chromium.launch({
-          headless: true,
-          executablePath: retryPath,
-          args: launchArgs
-        });
-      }
-
-      // Final attempt standard
-      return await chromium.launch({
-        headless: true,
-        args: launchArgs
-      });
+  /**
+   * Initialize the environment and perform one bounded launch check before the API starts
+   * accepting requests. The API remains available even if this check fails.
+   */
+  public static async initialize(): Promise<BrowserStatus> {
+    this.initEnvironment();
+    try {
+      const browser = await this.launch();
+      const status = this.cachedStatus || {
+        ready: true,
+        version: browser.version(),
+        executablePath: this.findChromiumExecutable() || 'detected-by-playwright',
+        browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
+        user: process.env.USER || (process.getuid ? String(process.getuid()) : 'unknown'),
+        homeDir: process.env.HOME || ''
+      };
+      await browser.close();
+      this.cachedStatus = status;
+      return { ...status };
+    } catch (err) {
+      const status = this.cachedStatus || {
+        ready: false,
+        executablePath: this.findChromiumExecutable() || 'not-found',
+        browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
+        user: process.env.USER || (process.getuid ? String(process.getuid()) : 'unknown'),
+        homeDir: process.env.HOME || '',
+        error: (err as Error)?.message || String(err)
+      };
+      this.cachedStatus = status;
+      return { ...status };
     }
   }
 
@@ -192,31 +214,8 @@ export class BrowserManager {
    */
   public static async getStatus(): Promise<BrowserStatus> {
     this.initEnvironment();
-    const execPath = this.findChromiumExecutable();
-    const currentUser = process.env.USER || (process.getuid ? String(process.getuid()) : 'unknown');
-    const homeDir = process.env.HOME || '';
-
-    try {
-      const browser = await this.launch();
-      const version = browser.version();
-      await browser.close();
-      return {
-        ready: true,
-        version,
-        executablePath: execPath || 'detected-by-playwright',
-        browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
-        user: currentUser,
-        homeDir
-      };
-    } catch (err: any) {
-      return {
-        ready: false,
-        executablePath: execPath || 'not-found',
-        browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '0',
-        user: currentUser,
-        homeDir,
-        error: err?.message || String(err)
-      };
-    }
+    if (this.cachedStatus) return { ...this.cachedStatus };
+    return this.initialize();
   }
+
 }

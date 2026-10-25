@@ -266,8 +266,11 @@ export class PlaywrightRunner {
           if (resp) {
             navResponseStatus = resp.status();
           }
-          // Allow page scripts a brief 300ms hydration window
-          await page.waitForTimeout(300).catch(() => {});
+          // Best-effort network-idle wait only. Some sites keep analytics/polling requests
+          // open forever, so timeout is intentionally bounded and not treated as a failure.
+          await page.waitForLoadState('networkidle', { timeout: 1800 }).catch(() => {});
+          // Small hydration window for client-rendered content.
+          await page.waitForTimeout(200).catch(() => {});
         } catch (err: any) {
           navError = err;
         }
@@ -694,16 +697,51 @@ export class PlaywrightRunner {
     // TEST-03 — Broken Images
     // ==============================================================
     if (tc.id === 'TEST-03') {
-      const imageReport = await page.evaluate(() => {
+      const imageReport = await page.evaluate(async () => {
         const imgs = Array.from(document.images);
+        // Give lazy/external images a bounded chance to settle. `!img.complete` by itself
+        // is not proof of a broken image; it often means the request is still in flight.
+        await Promise.all(imgs.map(img => new Promise<void>(resolve => {
+          if (img.complete) return resolve();
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            img.removeEventListener('load', finish);
+            img.removeEventListener('error', finish);
+            resolve();
+          };
+          img.addEventListener('load', finish, { once: true });
+          img.addEventListener('error', finish, { once: true });
+          setTimeout(finish, 2500);
+        })));
+
         const broken = imgs
-          .filter(img => !img.complete || img.naturalWidth === 0)
-          .map(i => ({ src: i.src, alt: i.alt || '(no alt)' }));
+          .filter(img => img.complete && img.naturalWidth === 0)
+          .map(img => ({ src: img.currentSrc || img.src, alt: img.alt || '(no alt)' }));
+        const pending = imgs
+          .filter(img => !img.complete)
+          .map(img => ({ src: img.currentSrc || img.src, alt: img.alt || '(no alt)' }));
+        return { total: imgs.length, broken, pending, inspectionError: false };
+      }).catch(() => ({ total: 0, broken: [], pending: [], inspectionError: true }));
+
+      if (imageReport.inspectionError) {
         return {
-          total: imgs.length,
-          broken
+          testId: tc.id,
+          name: tc.name || tc.title,
+          category: tc.category,
+          priority: tc.priority,
+          status: 'WARNING',
+          durationMs: Date.now() - startTime,
+          duration: Date.now() - startTime,
+          timestamp: new Date().toISOString(),
+          expectedResult: tc.expected_result,
+          expected: tc.expected_result,
+          actualResult: 'Image inspection could not complete; image status is unknown.',
+          actual: 'Image inspection could not complete; image status is unknown.',
+          suggestedFix: 'Retry the audit and check browser/page stability if image inspection repeatedly fails.'
         };
-      }).catch(() => ({ total: 0, broken: [] }));
+      }
 
       if (imageReport.total === 0) {
         return {
@@ -740,6 +778,25 @@ export class PlaywrightRunner {
           error: `Broken image: ${imageReport.broken[0].src}`,
           suggestedFix: 'Verify image asset paths, ensure URLs return HTTP 200, and check CDN links.',
           evidence: imageReport.broken.map(b => `${b.src} [alt: "${b.alt}"]`)
+        };
+      }
+
+      if (imageReport.pending.length > 0) {
+        return {
+          testId: tc.id,
+          name: tc.name || tc.title,
+          category: tc.category,
+          priority: tc.priority,
+          status: 'WARNING',
+          durationMs: Date.now() - startTime,
+          duration: Date.now() - startTime,
+          timestamp: new Date().toISOString(),
+          expectedResult: tc.expected_result,
+          expected: tc.expected_result,
+          actualResult: `${imageReport.pending.length} image(s) were still loading after the 2.5s wait; their status is inconclusive.`,
+          actual: `${imageReport.pending.length} image(s) were still loading after the 2.5s wait; their status is inconclusive.`,
+          suggestedFix: 'Check slow image hosts or lazy-loading behavior, then repeat the audit.',
+          evidence: imageReport.pending.map(img => `${img.src} [still loading]`)
         };
       }
 
@@ -1060,7 +1117,13 @@ export class PlaywrightRunner {
     // TEST-08 — Network Failures
     // ==============================================================
     if (tc.id === 'TEST-08') {
-      const failedReqs = interceptedRequests.filter(r => r.failed && !r.url.includes('favicon.ico'));
+      // TEST-03 owns image-load validation. Excluding image requests here prevents one broken
+      // product image from being scored again as a second TEST-08 network finding.
+      const failedReqs = Array.from(new Map(
+        interceptedRequests
+          .filter(r => r.failed && !r.url.includes('favicon.ico') && r.resourceType !== 'image')
+          .map(r => [`${r.url}|${r.resourceType}|${r.status}`, r])
+      ).values());
       const criticalTypes = ['document', 'script', 'stylesheet', 'xhr', 'fetch'];
       const criticalFailed = failedReqs.filter(r => criticalTypes.includes(r.resourceType));
 

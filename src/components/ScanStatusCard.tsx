@@ -17,11 +17,16 @@ export const ScanStatusCard: React.FC<ScanStatusCardProps> = ({
   onViewFullAudit,
   targetUrl,
 }) => {
+  // Treat the backend run status as authoritative as well as the local UI flag.
+  // This prevents a transient isScanning=false update from exposing READY TO AUDIT
+  // while the current backend run is still active.
+  const scanning = isScanning || activeRun?.status === 'running';
+
   // Determine subtext
   const currentTest = activeRun?.currentTestId
     ? `${activeRun.currentTestId}: ${activeRun.currentTestName || 'Execution'}`
     : 'TEST-09: Navigation';
-  const subtext = isScanning
+  const subtext = scanning
     ? `${currentTest} • Max budget: 120s`
     : activeRun
       ? `${activeRun.url || targetUrl} • 16 Tests Evaluated`
@@ -29,7 +34,7 @@ export const ScanStatusCard: React.FC<ScanStatusCardProps> = ({
 
   // Determine score and status badge
   const score = activeRun?.overall_score ?? null;
-  const healthStatus = activeRun?.healthStatus ?? (isScanning ? 'SCANNING' : 'STANDBY');
+  const healthStatus = activeRun?.healthStatus ?? (scanning ? 'SCANNING' : 'STANDBY');
 
   const getHealthBadgeColor = (status: string) => {
     switch (status) {
@@ -68,12 +73,19 @@ export const ScanStatusCard: React.FC<ScanStatusCardProps> = ({
 
       {/* Main Status / Score Display */}
       <div className="my-4">
-        {isScanning ? (
+        {scanning ? (
           <div className="flex items-center gap-4">
             <h2 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-white font-mono flex items-center gap-3">
               SCANNING
               <Loader2 className="w-7 h-7 sm:w-9 sm:h-9 text-[#8B5CF6] animate-spin" />
             </h2>
+          </div>
+        ) : activeRun && activeRun.status === 'failed' && (activeRun.results?.length ?? 0) === 0 ? (
+          <div className="flex flex-col gap-2">
+            <div className="text-3xl sm:text-4xl font-extrabold tracking-tight text-rose-400 font-mono">
+              SCAN FAILED
+            </div>
+            <p className="text-sm text-neutral-400">The browser scan did not produce results, so no website score is available.</p>
           </div>
         ) : activeRun ? (
           <div className="flex flex-col sm:flex-row sm:items-baseline gap-3">
@@ -102,7 +114,7 @@ export const ScanStatusCard: React.FC<ScanStatusCardProps> = ({
 
       {/* Bottom Main Action Button */}
       <div className="mt-6 pt-4 border-t border-[#141414]">
-        {isScanning ? (
+        {scanning ? (
           <button
             disabled
             className="w-full py-4 rounded-2xl bg-[#8B5CF6]/80 text-white font-semibold text-sm tracking-wide font-mono flex items-center justify-center gap-2 cursor-not-allowed shadow-[0_0_25px_rgba(139,92,246,0.25)]"

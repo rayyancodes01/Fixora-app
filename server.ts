@@ -10,7 +10,9 @@ import { BrowserManager } from './server/services/browserManager.ts';
 // Load environment variables
 dotenv.config();
 
-// Initialize Playwright environment and runtime links
+// Initialize Playwright environment and runtime links. Chromium readiness is checked
+// once before accepting requests so the dashboard status endpoint does not launch a
+// second browser while a scan may already be starting.
 BrowserManager.initEnvironment();
 
 const app = express();
@@ -53,6 +55,11 @@ app.get('/api/browser-status', async (_req, res) => {
 });
 
 async function startServer() {
+  const browserStatus = await BrowserManager.initialize();
+  if (!browserStatus.ready) {
+    console.warn(`[BugScout] Chromium is not ready at startup: ${browserStatus.error || 'unknown error'}`);
+  }
+
   if (!isProduction) {
     // Development mode: Vite middleware
     const { createServer: createViteServer } = await import('vite');
