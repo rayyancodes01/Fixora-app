@@ -261,7 +261,7 @@ export class PlaywrightRunner {
         try {
           const resp = await page.goto(run.url, {
             waitUntil: 'domcontentloaded',
-            timeout: 12000
+            timeout: 30000
           });
           if (resp) {
             navResponseStatus = resp.status();
