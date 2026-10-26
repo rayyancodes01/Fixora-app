@@ -84,7 +84,7 @@ export class PlaywrightRunner {
     activeRunAbortControllers.set(run.id, abortController);
     const signal = abortController.signal;
 
-    const INDIVIDUAL_TEST_TIMEOUT_MS = 7500;
+    const INDIVIDUAL_TEST_TIMEOUT_MS = 30000;
     const GLOBAL_SCAN_BUDGET_MS = 115000;
 
     // Hard 120-second timeout controller budget
